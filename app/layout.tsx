@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "십종영법술",
   description:
-    "『주술회전』 십종영법술 모티브. 양손 옥견(玉犬) 그림자 결인이 잡힐 때만 식신이 나타나는 팬 메이드 체험입니다.",
+    "십종영법술 모티브. 손끝 8·12와 16·20이 각각 가까울 때 메이가 나타나는 팬 메이드 체험입니다.",
 };
 
 export default function RootLayout({

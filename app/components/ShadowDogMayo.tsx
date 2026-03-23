@@ -10,9 +10,17 @@ const MODEL_URL =
 
 const CAT_SRC = "/cat/mayo.png";
 
-/** 옥견 그림자 결인이 잡힌 것으로 볼 최소 연속 프레임 */
-const GYOKKEN_STREAK_ON = 14;
-const GYOKKEN_STREAK_OFF = 10;
+/** 8·12 / 16·20 붙음이 잡힌 것으로 볼 최소 연속 프레임 */
+const MAYO_STREAK_ON = 12;
+const MAYO_STREAK_OFF = 8;
+
+/** 정규화 좌표 기준 (0~1). 값은 손 크기·거리에 맞게 조절 */
+/** 8·12 / 16·20 각 쌍: 이 거리 이하만 ‘붙음’ (타이트) */
+const PAIR_CLOSE_MAX = 0.065;
+/** 검·중 묶음 중점 ↔ 약·새 묶음 중점: 이 거리 이상이어야 함 (서로 떨어짐) */
+const BUNDLE_APART_MIN = 0.09;
+/** 엄지 끝(4)이 각 묶음 중점에서 이 거리 이상 떨어져야 함 */
+const THUMB_AWAY_FROM_BUNDLE_MIN = 0.052;
 
 type Lm = { x: number; y: number; z?: number };
 
@@ -20,102 +28,188 @@ type HandLandmarkerHandle = {
   detectForVideo: (
     video: HTMLVideoElement,
     timestamp: number,
-  ) => { landmarks: Lm[][] };
+  ) => {
+    landmarks: Lm[][];
+    handedness?: { categoryName: string; score: number }[][];
+  };
   close: () => void;
 };
+
+/** MediaPipe Hand 21점 연결 (트래킹 디버그용) */
+const HAND_CONNECTIONS: [number, number][] = [
+  [0, 1],
+  [1, 2],
+  [2, 3],
+  [3, 4],
+  [0, 5],
+  [5, 6],
+  [6, 7],
+  [7, 8],
+  [0, 9],
+  [9, 10],
+  [10, 11],
+  [11, 12],
+  [0, 13],
+  [13, 14],
+  [14, 15],
+  [15, 16],
+  [0, 17],
+  [17, 18],
+  [18, 19],
+  [19, 20],
+  [5, 9],
+  [9, 13],
+  [13, 17],
+];
+
+const HAND_COLORS = ["#22d3ee", "#e879f9"] as const;
+
+function toScreenMirrored(x: number, y: number, cw: number, ch: number) {
+  return { sx: (1 - x) * cw, sy: y * ch };
+}
+
+function fitCanvasToContainer(
+  canvas: HTMLCanvasElement,
+  container: HTMLElement,
+): { ctx: CanvasRenderingContext2D; cw: number; ch: number } | null {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+  const cw = container.clientWidth;
+  const ch = container.clientHeight;
+  if (cw < 2 || ch < 2) return null;
+
+  const tw = Math.round(cw * dpr);
+  const th = Math.round(ch * dpr);
+  if (canvas.width !== tw || canvas.height !== th) {
+    canvas.width = tw;
+    canvas.height = th;
+    canvas.style.width = `${cw}px`;
+    canvas.style.height = `${ch}px`;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, cw, ch };
+}
+
+function drawHandLandmarksDebug(
+  ctx: CanvasRenderingContext2D,
+  lm: Lm[],
+  cw: number,
+  ch: number,
+  handIndex: number,
+  handednessLabel?: string,
+) {
+  const stroke = HAND_COLORS[handIndex % HAND_COLORS.length];
+
+  ctx.strokeStyle = stroke + "aa";
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const [a, b] of HAND_CONNECTIONS) {
+    const A = toScreenMirrored(lm[a].x, lm[a].y, cw, ch);
+    const B = toScreenMirrored(lm[b].x, lm[b].y, cw, ch);
+    ctx.beginPath();
+    ctx.moveTo(A.sx, A.sy);
+    ctx.lineTo(B.sx, B.sy);
+    ctx.stroke();
+  }
+
+  const r = handIndex === 0 ? 4 : 4.5;
+  for (let i = 0; i < lm.length; i++) {
+    const { sx, sy } = toScreenMirrored(lm[i].x, lm[i].y, cw, ch);
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI * 2);
+    ctx.fillStyle = stroke;
+    ctx.fill();
+    ctx.strokeStyle = "#0f172a";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    const label = String(i);
+    ctx.font = "600 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "rgba(0,0,0,0.85)";
+    ctx.lineJoin = "round";
+    ctx.strokeText(label, sx + 7, sy - 7);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(label, sx + 7, sy - 7);
+  }
+
+  if (handednessLabel && lm[0]) {
+    const w0 = toScreenMirrored(lm[0].x, lm[0].y, cw, ch);
+    ctx.font = "600 10px system-ui, sans-serif";
+    ctx.fillStyle = stroke;
+    ctx.strokeStyle = "rgba(0,0,0,0.7)";
+    ctx.lineWidth = 2;
+    const tag = `손${handIndex + 1} · ${handednessLabel}`;
+    ctx.strokeText(tag, w0.sx + 8, w0.sy + 22);
+    ctx.fillText(tag, w0.sx + 8, w0.sy + 22);
+  }
+}
 
 function dist2(a: Lm, b: Lm) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
-/** 검지~새끼: 펼침 */
-function isFourFingerExtended(lm: Lm[], tip: number, pip: number) {
-  const w = lm[0];
-  return dist2(lm[tip], w) > dist2(lm[pip], w) * 1.06;
+function mid(a: Lm, b: Lm): Lm {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
-function isThumbExtendedOut(lm: Lm[]) {
+/** 손가락이 펼친 상태(끝이 PIP보다 손목에서 더 멀다) */
+function isAllFingersExtendedOpen(lm: Lm[]): boolean {
   const w = lm[0];
-  return dist2(lm[4], w) > dist2(lm[3], w) * 1.04;
-}
-
-/** 엄지는 접힌 편(옆 손: 검·중만 길게) */
-function isThumbFoldedIn(lm: Lm[]) {
-  const w = lm[0];
-  return dist2(lm[4], w) <= dist2(lm[3], w) * 1.12;
+  const thumb =
+    dist2(lm[4], w) > dist2(lm[3], w) * 1.03;
+  const index =
+    dist2(lm[8], w) > dist2(lm[6], w) * 1.05;
+  const middle =
+    dist2(lm[12], w) > dist2(lm[10], w) * 1.05;
+  const ring =
+    dist2(lm[16], w) > dist2(lm[14], w) * 1.05;
+  const pinky =
+    dist2(lm[20], w) > dist2(lm[18], w) * 1.05;
+  return thumb && index && middle && ring && pinky;
 }
 
 /**
- * 아래 손(그림자의 주둥이): 검지·중지만 펼치고, 약지·새끼·엄지는 접음.
- * 두 손가락 방향이 비슷해야 함.
+ * 타이트: 손가락 펼침 + 8·12 붙음 + 16·20 붙음 + 두 묶음은 떨어짐 + 엄지(4)는 묶음들과 떨어짐.
  */
-function isSnoutHand(lm: Lm[]): boolean {
-  const idx = isFourFingerExtended(lm, 8, 6);
-  const mid = isFourFingerExtended(lm, 12, 10);
-  const ring = isFourFingerExtended(lm, 16, 14);
-  const pinky = isFourFingerExtended(lm, 20, 18);
-  if (!idx || !mid || ring || pinky) return false;
-  if (!isThumbFoldedIn(lm)) return false;
+function isMayoTipPinchPose(lm: Lm[]): boolean {
+  if (!isAllFingersExtendedOpen(lm)) return false;
 
-  const w = lm[0];
-  const v8 = { x: lm[8].x - w.x, y: lm[8].y - w.y };
-  const v12 = { x: lm[12].x - w.x, y: lm[12].y - w.y };
-  const m =
-    Math.hypot(v8.x, v8.y) * Math.hypot(v12.x, v12.y);
-  if (m < 1e-5) return false;
-  const cos = (v8.x * v12.x + v8.y * v12.y) / m;
-  return cos > 0.82;
+  const dIM = dist2(lm[8], lm[12]);
+  const dRP = dist2(lm[16], lm[20]);
+  if (dIM > PAIR_CLOSE_MAX || dRP > PAIR_CLOSE_MAX) return false;
+
+  const cIM = mid(lm[8], lm[12]);
+  const cRP = mid(lm[16], lm[20]);
+  if (dist2(cIM, cRP) < BUNDLE_APART_MIN) return false;
+
+  const t = lm[4];
+  if (
+    dist2(t, cIM) < THUMB_AWAY_FROM_BUNDLE_MIN ||
+    dist2(t, cRP) < THUMB_AWAY_FROM_BUNDLE_MIN
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
-/**
- * 위 손(그림자의 귀): 엄지만 세우고 나머지 네 손가락은 굽힘.
- * 엄지 끝이 손목보다 위이거나, 다른 손끝들 중 가장 위쪽에 가깝게.
- */
-function isEarHandThumbUp(lm: Lm[]): boolean {
-  if (!isThumbExtendedOut(lm)) return false;
-
-  const w = lm[0];
-  const thumbTip = lm[4];
-  const minOtherY = Math.min(lm[8].y, lm[12].y, lm[16].y, lm[20].y);
-  const thumbMostUpright =
-    thumbTip.y < w.y - 0.012 || thumbTip.y <= minOtherY + 0.035;
-
-  if (!thumbMostUpright) return false;
-
-  return (
-    !isFourFingerExtended(lm, 8, 6) &&
-    !isFourFingerExtended(lm, 12, 10) &&
-    !isFourFingerExtended(lm, 16, 14) &&
-    !isFourFingerExtended(lm, 20, 18)
-  );
-}
-
-function wristsClose(a: Lm[], b: Lm[], max: number) {
-  return dist2(a[0], b[0]) <= max;
-}
-
-/**
- * 만화 속 옥견 그림자: 양손 겹침 + 한 손은 엄지만 위, 다른 손은 검·중만 길게.
- * 감지 순서가 바뀔 수 있어 양쪽 배치를 모두 검사.
- */
-function isGyokkenTwinShadowPose(pair: Lm[][]): boolean {
-  if (pair.length < 2) return false;
-  const A = pair[0];
-  const B = pair[1];
-  if (!wristsClose(A, B, 0.48)) return false;
-
-  const match1 = isEarHandThumbUp(A) && isSnoutHand(B);
-  const match2 = isEarHandThumbUp(B) && isSnoutHand(A);
-  return match1 || match2;
+function anyHandMatchesMayoPose(lms: Lm[][]): boolean {
+  return lms.some(isMayoTipPinchPose);
 }
 
 export default function ShadowDogMayo() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoContainerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const showLandmarksRef = useRef(true);
   const rafRef = useRef(0);
   const streamRef = useRef<MediaStream | null>(null);
-  const gyokkenOnStreak = useRef(0);
-  const gyokkenOffStreak = useRef(0);
-  const gyokkenActiveRef = useRef(false);
+  const mayoOnStreak = useRef(0);
+  const mayoOffStreak = useRef(0);
+  const mayoActiveRef = useRef(false);
 
   const [step, setStep] = useState<"welcome" | "live">("welcome");
   const [camError, setCamError] = useState<string | null>(null);
@@ -123,7 +217,8 @@ export default function ShadowDogMayo() {
     "off" | "loading" | "ready" | "error"
   >("off");
   const [handCount, setHandCount] = useState(0);
-  const [gyokkenActive, setGyokkenActive] = useState(false);
+  const [mayoActive, setMayoActive] = useState(false);
+  const [showLandmarks, setShowLandmarks] = useState(true);
 
   const [floatPos, setFloatPos] = useState({ x: 50, y: 50 });
 
@@ -164,9 +259,9 @@ export default function ShadowDogMayo() {
     return () => stopStream();
   }, [stopStream]);
 
-  /** 옥견 결인이 유지되는 동안만 무작위 이동 */
+  /** 결인(8·12 / 16·20)이 유지되는 동안만 무작위 이동 */
   useEffect(() => {
-    if (step !== "live" || !gyokkenActive) return;
+    if (step !== "live" || !mayoActive) return;
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -194,7 +289,11 @@ export default function ShadowDogMayo() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [step, gyokkenActive]);
+  }, [step, mayoActive]);
+
+  useEffect(() => {
+    showLandmarksRef.current = showLandmarks;
+  }, [showLandmarks]);
 
   useEffect(() => {
     if (step !== "live") return;
@@ -207,10 +306,10 @@ export default function ShadowDogMayo() {
       rafRef.current = 0;
     };
 
-    const setGyokkenUi = (active: boolean) => {
-      if (gyokkenActiveRef.current === active) return;
-      gyokkenActiveRef.current = active;
-      setGyokkenActive(active);
+    const setMayoUi = (active: boolean) => {
+      if (mayoActiveRef.current === active) return;
+      mayoActiveRef.current = active;
+      setMayoActive(active);
     };
 
     let prevHandCount = -1;
@@ -230,24 +329,54 @@ export default function ShadowDogMayo() {
       const lms = result.landmarks;
       const n = lms.length;
 
+      const container = videoContainerRef.current;
+      const canvas = canvasRef.current;
+      if (container && canvas) {
+        const fit = fitCanvasToContainer(canvas, container);
+        if (fit) {
+          const { ctx, cw, ch } = fit;
+          ctx.clearRect(0, 0, cw, ch);
+          if (showLandmarksRef.current) {
+            for (let hi = 0; hi < lms.length; hi++) {
+              const lm = lms[hi];
+              const rawName = result.handedness?.[hi]?.[0]?.categoryName;
+              const handed =
+                rawName === "Left"
+                  ? "왼손"
+                  : rawName === "Right"
+                    ? "오른손"
+                    : rawName ?? "";
+              drawHandLandmarksDebug(
+                ctx,
+                lm,
+                cw,
+                ch,
+                hi,
+                handed || undefined,
+              );
+            }
+          }
+        }
+      }
+
       if (n !== prevHandCount) {
         prevHandCount = n;
         setHandCount(n);
       }
 
-      const gyokken = n >= 2 && isGyokkenTwinShadowPose(lms);
+      const pinch = n >= 1 && anyHandMatchesMayoPose(lms);
 
-      if (gyokken) {
-        gyokkenOffStreak.current = 0;
-        gyokkenOnStreak.current += 1;
-        if (gyokkenOnStreak.current >= GYOKKEN_STREAK_ON) {
-          setGyokkenUi(true);
+      if (pinch) {
+        mayoOffStreak.current = 0;
+        mayoOnStreak.current += 1;
+        if (mayoOnStreak.current >= MAYO_STREAK_ON) {
+          setMayoUi(true);
         }
       } else {
-        gyokkenOnStreak.current = 0;
-        gyokkenOffStreak.current += 1;
-        if (gyokkenOffStreak.current >= GYOKKEN_STREAK_OFF) {
-          setGyokkenUi(false);
+        mayoOnStreak.current = 0;
+        mayoOffStreak.current += 1;
+        if (mayoOffStreak.current >= MAYO_STREAK_OFF) {
+          setMayoUi(false);
         }
       }
 
@@ -285,20 +414,18 @@ export default function ShadowDogMayo() {
       cancelled = true;
       stopLoop();
       landmarker?.close();
-      gyokkenOnStreak.current = 0;
-      gyokkenOffStreak.current = 0;
-      gyokkenActiveRef.current = false;
-      setGyokkenActive(false);
+      mayoOnStreak.current = 0;
+      mayoOffStreak.current = 0;
+      mayoActiveRef.current = false;
+      setMayoActive(false);
       setHandCount(0);
     };
   }, [step]);
 
   const statusLine = (() => {
-    if (gyokkenActive) return "玉犬 · 옥견 그림자 결인 포착";
-    if (handCount === 0) return "양손으로 옥견 그림자를 만들어 주세요";
-    if (handCount === 1)
-      return "한 손 더 — 참고처럼 위아래로 겹쳐 주세요";
-    return "엄지만 위로 세운 손 + 검지·중지만 펼친 손 — 맞춰 주세요";
+    if (mayoActive) return "결인 타이트 — 메이 소환";
+    if (handCount === 0) return "손을 화면에 보여 주세요";
+    return "펼친 손 · 8·12·16·20 붙임 · 묶음 간격 · 엄지(4) 분리";
   })();
 
   return (
@@ -308,25 +435,24 @@ export default function ShadowDogMayo() {
           十種影法術 · 십종영법술 모티브 (팬 메이드)
         </p>
         <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
-          작중 옥견(玉犬)을 부릴 때 쓰는{" "}
-          <strong>양손 그림자 결인</strong>을 웹캠으로 맞추면 고양이(
+          <strong>한 손</strong>(왼·오 무관). 손가락은 <strong>펼친 상태</strong>
+          에서 검·중 끝(8·12), 약·새 끝(16·20)만 각각 붙이고, 두 묶음은
+          떨어뜨리며 엄지 끝(4)도 묶음에서 떨어지면 메이(
           <code className="text-xs">public/cat/mayo.png</code>)가 뜹니다.
-          한 손만 보이거나 다른 모양이면 나오지 않습니다.
         </p>
       </header>
 
       {step === "welcome" && (
         <div className="flex flex-col items-center gap-4 rounded-2xl border border-zinc-200 bg-white p-10 dark:border-zinc-800 dark:bg-zinc-950">
           <p className="max-w-md text-center text-sm text-zinc-600 dark:text-zinc-400">
-            그림자를 비추려면 먼저 &quot;영(影)&quot;이 들어올 통로를 열어야
-            합니다. 양손이 동시에 잡히도록 카메라 거리를 두는 것이 좋습니다.
+            카메라를 켠 뒤, 한 손으로 8·12와 16·20을 각각 붙여 보세요.
           </p>
           <button
             type="button"
             onClick={startCamera}
             className="rounded-full bg-zinc-900 px-6 py-3 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
           >
-            그림자 매개 열기
+            카메라 열기
           </button>
           {camError && (
             <p className="max-w-md text-center text-sm text-red-600 dark:text-red-400">
@@ -338,6 +464,7 @@ export default function ShadowDogMayo() {
 
       <div className={step === "live" ? "block" : "contents"}>
         <div
+          ref={videoContainerRef}
           className={
             step === "live"
               ? "relative aspect-video w-full overflow-hidden rounded-2xl border border-zinc-200 bg-black shadow-lg dark:border-zinc-800"
@@ -355,7 +482,30 @@ export default function ShadowDogMayo() {
             muted
           />
 
-          {step === "live" && gyokkenActive && modelState === "ready" && (
+          {step === "live" && (
+            <canvas
+              ref={canvasRef}
+              className={`pointer-events-none absolute inset-0 z-[18] h-full w-full ${showLandmarks ? "opacity-100" : "opacity-0"
+                }`}
+              aria-hidden
+            />
+          )}
+
+          {step === "live" && modelState === "ready" && (
+            <div className="pointer-events-auto absolute right-2 bottom-2 z-[30] flex items-center gap-2 rounded-lg bg-black/70 px-2 py-1.5 text-xs text-white backdrop-blur-sm">
+              <label className="flex cursor-pointer items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={showLandmarks}
+                  onChange={(e) => setShowLandmarks(e.target.checked)}
+                  className="rounded border-zinc-500"
+                />
+                랜드마크
+              </label>
+            </div>
+          )}
+
+          {step === "live" && mayoActive && modelState === "ready" && (
             <div
               className="pointer-events-none absolute z-10 w-[min(36vw,200px)] max-w-[42%] select-none transition-[left,top] duration-[950ms] ease-in-out"
               style={{
@@ -387,9 +537,9 @@ export default function ShadowDogMayo() {
             </div>
           )}
           {step === "live" && modelState === "ready" && (
-            <div className="pointer-events-none absolute left-3 top-3 z-20 max-w-[min(92%,280px)]">
+            <div className="pointer-events-none absolute left-3 top-3 z-[25] max-w-[min(92%,280px)]">
               <span
-                className={`inline-block rounded-full px-3 py-1 text-xs backdrop-blur-sm ${gyokkenActive
+                className={`inline-block rounded-full px-3 py-1 text-xs backdrop-blur-sm ${mayoActive
                   ? "bg-amber-500/95 font-medium text-amber-950"
                   : "bg-black/55 text-white"
                   }`}
@@ -401,22 +551,50 @@ export default function ShadowDogMayo() {
         </div>
       </div>
 
+      {step === "live" && modelState === "ready" && (
+        <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+          <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+            MediaPipe 손 인덱스
+          </span>
+          {" · "}
+          <span className="text-cyan-600 dark:text-cyan-400">0</span> 손목 ·{" "}
+          <span className="text-cyan-600 dark:text-cyan-400">1–4</span> 엄지 ·{" "}
+          <span className="text-fuchsia-600 dark:text-fuchsia-400">5–8</span>{" "}
+          검지 · <span className="text-fuchsia-600 dark:text-fuchsia-400">9–12</span>{" "}
+          중지 ·{" "}
+          <span className="text-fuchsia-600 dark:text-fuchsia-400">13–16</span>{" "}
+          약지 ·{" "}
+          <span className="text-fuchsia-600 dark:text-fuchsia-400">17–20</span>{" "}
+          새끼 · 메이: 펼침+8–12+16–20 타이트+묶음 분리+4 분리 · 첫 손 시안, 둘째
+          보라
+        </div>
+      )}
+
       {step === "live" && (
         <div className="rounded-xl border border-zinc-200 bg-white p-4 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
           <p className="font-medium text-zinc-900 dark:text-zinc-100">
-            옥견 그림자 결인 (참고)
+            메이 소환 조건
           </p>
           <ul className="mt-2 list-inside list-disc space-y-1">
             <li>
-              <strong>한 손</strong>: 엄지만 위로 세우고, 검지·중지·약지·새끼는
-              굽혀 위쪽 손등을 덮듯이.
+              <strong>다섯 손가락 펼침</strong> (끝 관절이 손목 기준으로 펴진
+              상태).
             </li>
             <li>
-              <strong>다른 손</strong>: 검지와 중지만 곧게 펴서 &quot;주둥이&quot;
-              느낌으로, 엄지·약지·새끼는 접기.
+              <strong>8·12</strong> 거리 ≤{" "}
+              <code className="text-xs">{PAIR_CLOSE_MAX}</code>,{" "}
+              <strong>16·20</strong> 거리 ≤{" "}
+              <code className="text-xs">{PAIR_CLOSE_MAX}</code>.
             </li>
             <li>
-              두 손을 만화처럼 겹치고, 손목끼리 가깝게 맞추면 인식이 잘 붙습니다.
+              두 쌍의 <strong>중점 거리</strong> ≥{" "}
+              <code className="text-xs">{BUNDLE_APART_MIN}</code> (묶음끼리
+              떨어짐).
+            </li>
+            <li>
+              <strong>엄지 끝(4)</strong>가 각 묶음 중점에서 ≥{" "}
+              <code className="text-xs">{THUMB_AWAY_FROM_BUNDLE_MIN}</code> 이상
+              떨어짐.
             </li>
           </ul>
           <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-500">
