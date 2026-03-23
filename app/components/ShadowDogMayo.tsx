@@ -204,6 +204,8 @@ export default function ShadowDogMayo() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadRevokeRef = useRef<string | null>(null);
   const showLandmarksRef = useRef(true);
   const rafRef = useRef(0);
   const streamRef = useRef<MediaStream | null>(null);
@@ -219,8 +221,40 @@ export default function ShadowDogMayo() {
   const [handCount, setHandCount] = useState(0);
   const [mayoActive, setMayoActive] = useState(false);
   const [showLandmarks, setShowLandmarks] = useState(true);
+  const [uploadedObjectUrl, setUploadedObjectUrl] = useState<string | null>(
+    null,
+  );
 
   const [floatPos, setFloatPos] = useState({ x: 50, y: 50 });
+
+  const assignUpload = useCallback((file: File | null) => {
+    if (!file || !file.type.startsWith("image/")) return;
+    if (uploadRevokeRef.current) {
+      URL.revokeObjectURL(uploadRevokeRef.current);
+      uploadRevokeRef.current = null;
+    }
+    const url = URL.createObjectURL(file);
+    uploadRevokeRef.current = url;
+    setUploadedObjectUrl(url);
+  }, []);
+
+  const clearUpload = useCallback(() => {
+    if (uploadRevokeRef.current) {
+      URL.revokeObjectURL(uploadRevokeRef.current);
+      uploadRevokeRef.current = null;
+    }
+    setUploadedObjectUrl(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (uploadRevokeRef.current) {
+        URL.revokeObjectURL(uploadRevokeRef.current);
+        uploadRevokeRef.current = null;
+      }
+    };
+  }, []);
 
   const stopStream = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -428,29 +462,71 @@ export default function ShadowDogMayo() {
     return "펼친 손 · 8·12·16·20 붙임 · 묶음 간격 · 엄지(4) 분리";
   })();
 
+  const shellClass =
+    "mx-auto flex w-full max-w-none flex-col gap-3 px-0 py-4 md:max-w-5xl md:gap-6 md:px-4 md:py-8";
+
+  const uploadButtons = (
+    <div className="flex flex-wrap items-center gap-2 text-sm md:text-xs">
+      <button
+        type="button"
+        onClick={() => fileInputRef.current?.click()}
+        className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2.5 font-medium text-zinc-800 hover:bg-zinc-50 md:min-h-0 md:py-1.5 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
+      >
+        사진 업로드
+      </button>
+      {uploadedObjectUrl && (
+        <button
+          type="button"
+          onClick={clearUpload}
+          className="min-h-11 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 font-medium text-red-800 hover:bg-red-100 md:min-h-0 md:py-1.5 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
+        >
+          기본 이미지로
+        </button>
+      )}
+      <span className="text-zinc-500 max-md:w-full dark:text-zinc-400">
+        {uploadedObjectUrl
+          ? "업로드한 사진이 우선 표시됩니다."
+          : "미업로드 시 기본 고양이 이미지"}
+      </span>
+    </div>
+  );
+
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-8">
-      <header className="text-center">
+    <div className={shellClass}>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          assignUpload(e.target.files?.[0] ?? null);
+          e.target.value = "";
+        }}
+      />
+
+      <header className="px-3 text-center md:px-0">
         <p className="text-xs font-medium tracking-wide text-violet-600 dark:text-violet-400">
           十種影法術 · 십종영법술 모티브 (팬 메이드)
         </p>
         <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
           <strong>한 손</strong>(왼·오 무관). 손가락은 <strong>펼친 상태</strong>
           에서 검·중 끝(8·12), 약·새 끝(16·20)만 각각 붙이고, 두 묶음은
-          떨어뜨리며 엄지 끝(4)도 묶음에서 떨어지면 메이(
-          <code className="text-xs">public/cat/mayo.png</code>)가 뜹니다.
+          떨어뜨리며 엄지 끝(4)도 묶음에서 떨어지면 이미지가 뜹니다.{" "}
+          <strong>업로드한 사진이 있으면 그것을 먼저</strong> 씁니다(없으면{" "}
+          <code className="text-xs">public/cat/mayo.png</code>).
         </p>
       </header>
 
       {step === "welcome" && (
-        <div className="flex flex-col items-center gap-4 rounded-2xl border border-zinc-200 bg-white p-10 dark:border-zinc-800 dark:bg-zinc-950">
+        <div className="mx-3 flex flex-col items-center gap-4 rounded-2xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950 md:mx-0 md:p-10">
+          <div className="w-full max-w-md">{uploadButtons}</div>
           <p className="max-w-md text-center text-sm text-zinc-600 dark:text-zinc-400">
             카메라를 켠 뒤, 한 손으로 8·12와 16·20을 각각 붙여 보세요.
           </p>
           <button
             type="button"
             onClick={startCamera}
-            className="rounded-full bg-zinc-900 px-6 py-3 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+            className="min-h-12 rounded-full bg-zinc-900 px-8 py-3.5 text-base font-medium text-white hover:bg-zinc-800 md:min-h-0 md:px-6 md:py-3 md:text-sm dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
           >
             카메라 열기
           </button>
@@ -462,12 +538,23 @@ export default function ShadowDogMayo() {
         </div>
       )}
 
-      <div className={step === "live" ? "block" : "contents"}>
+      <div className={step === "live" ? "flex flex-col gap-3" : "contents"}>
+        {step === "live" && modelState === "loading" && (
+          <div className="mx-3 rounded-xl bg-zinc-800 px-4 py-3 text-center text-sm text-white md:mx-0">
+            그림자 감지 술식 불러오는 중…
+          </div>
+        )}
+        {step === "live" && modelState === "error" && (
+          <div className="mx-3 rounded-xl bg-red-950 px-4 py-3 text-center text-sm text-red-100 md:mx-0">
+            그림자 감지 술식을 불러오지 못했습니다.
+          </div>
+        )}
+
         <div
           ref={videoContainerRef}
           className={
             step === "live"
-              ? "relative aspect-video w-full overflow-hidden rounded-2xl border border-zinc-200 bg-black shadow-lg dark:border-zinc-800"
+              ? "relative w-full overflow-hidden border-y border-zinc-200 bg-black max-md:aspect-[9/16] max-md:min-h-[58svh] max-md:max-h-[80svh] md:aspect-video md:rounded-2xl md:border md:shadow-lg dark:border-zinc-800"
               : "sr-only"
           }
         >
@@ -491,20 +578,6 @@ export default function ShadowDogMayo() {
             />
           )}
 
-          {step === "live" && modelState === "ready" && (
-            <div className="pointer-events-auto absolute right-2 bottom-2 z-[30] flex items-center gap-2 rounded-lg bg-black/70 px-2 py-1.5 text-xs text-white backdrop-blur-sm">
-              <label className="flex cursor-pointer items-center gap-1.5">
-                <input
-                  type="checkbox"
-                  checked={showLandmarks}
-                  onChange={(e) => setShowLandmarks(e.target.checked)}
-                  className="rounded border-zinc-500"
-                />
-                랜드마크
-              </label>
-            </div>
-          )}
-
           {step === "live" && mayoActive && modelState === "ready" && (
             <div
               className="pointer-events-none absolute z-10 w-[min(36vw,200px)] max-w-[42%] select-none transition-[left,top] duration-[950ms] ease-in-out"
@@ -515,44 +588,54 @@ export default function ShadowDogMayo() {
                 aspectRatio: "1",
               }}
             >
-              <Image
-                src={CAT_SRC}
-                alt="메이"
-                fill
-                className="object-contain drop-shadow-[0_6px_20px_rgba(0,0,0,0.45)]"
-                sizes="(max-width: 768px) 36vw, 200px"
-                priority
-              />
-            </div>
-          )}
-
-          {step === "live" && modelState === "loading" && (
-            <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-black/50 text-sm text-white">
-              그림자 감지 술식 불러오는 중…
-            </div>
-          )}
-          {step === "live" && modelState === "error" && (
-            <div className="absolute inset-0 z-20 flex items-center justify-center bg-red-950/90 p-4 text-center text-sm text-red-100">
-              그림자 감지 술식을 불러오지 못했습니다.
-            </div>
-          )}
-          {step === "live" && modelState === "ready" && (
-            <div className="pointer-events-none absolute left-3 top-3 z-[25] max-w-[min(92%,280px)]">
-              <span
-                className={`inline-block rounded-full px-3 py-1 text-xs backdrop-blur-sm ${mayoActive
-                  ? "bg-amber-500/95 font-medium text-amber-950"
-                  : "bg-black/55 text-white"
-                  }`}
-              >
-                {statusLine}
-              </span>
+              <div className="relative h-full min-h-[80px] w-full">
+                {uploadedObjectUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- blob URL
+                  <img
+                    src={uploadedObjectUrl}
+                    alt="업로드한 이미지"
+                    className="absolute inset-0 h-full w-full object-contain drop-shadow-[0_6px_20px_rgba(0,0,0,0.45)]"
+                  />
+                ) : (
+                  <Image
+                    src={CAT_SRC}
+                    alt="메이"
+                    fill
+                    className="object-contain drop-shadow-[0_6px_20px_rgba(0,0,0,0.45)]"
+                    sizes="(max-width: 768px) 36vw, 200px"
+                    priority
+                  />
+                )}
+              </div>
             </div>
           )}
         </div>
+
+        {step === "live" && modelState === "ready" && (
+          <div className="mx-3 flex flex-col gap-3 md:mx-0">
+            <div
+              className={`rounded-full px-4 py-2 text-center text-sm md:text-left md:text-xs ${mayoActive ? "bg-amber-200 font-medium text-amber-950 dark:bg-amber-500/90 dark:text-amber-950" : "bg-zinc-200 text-zinc-800 dark:bg-zinc-700 dark:text-zinc-100"}`}
+            >
+              {statusLine}
+            </div>
+            <div className="flex flex-col gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-700 dark:bg-zinc-900 md:flex-row md:flex-wrap md:items-center">
+              {uploadButtons}
+              <label className="flex min-h-11 cursor-pointer items-center gap-2 text-sm md:min-h-0 md:text-xs">
+                <input
+                  type="checkbox"
+                  checked={showLandmarks}
+                  onChange={(e) => setShowLandmarks(e.target.checked)}
+                  className="size-5 rounded border-zinc-500 md:size-4"
+                />
+                랜드마크 표시
+              </label>
+            </div>
+          </div>
+        )}
       </div>
 
       {step === "live" && modelState === "ready" && (
-        <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+        <div className="mx-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 md:mx-0">
           <span className="font-semibold text-zinc-900 dark:text-zinc-100">
             MediaPipe 손 인덱스
           </span>
@@ -571,7 +654,7 @@ export default function ShadowDogMayo() {
       )}
 
       {step === "live" && (
-        <div className="rounded-xl border border-zinc-200 bg-white p-4 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
+        <div className="mx-3 rounded-xl border border-zinc-200 bg-white p-4 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 md:mx-0">
           <p className="font-medium text-zinc-900 dark:text-zinc-100">
             메이 소환 조건
           </p>
